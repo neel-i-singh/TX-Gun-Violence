@@ -1,0 +1,898 @@
+---
+title: "Asthma ED November Draft Analysis"
+author: "Sarah Chambliss"
+date: "10/29/2022"
+output: html_document
+---
+```{r setup, include=FALSE}
+library(spdep)
+library(sf)
+library(CARBayes)
+library(tidycensus)
+library(tidyverse)
+library(ggplot2)
+library(ggmap)
+library(viridis)
+library(spatstat)
+library(Hmisc)
+library(parallel)
+library(coda)
+
+knitr::opts_chunk$set(echo = TRUE)
+ggplot2::theme_set(ggplot2::theme_bw())
+```
+
+## Load and format THCIC data for full geographic area
+```{r load Austin MSA 5-county data}
+ATX_bkgdmap <- readRDS("../Data/ATXMSA_bkgdmap.rds")
+AustinMSA_county <- c("021","055","209","453","491")
+AustinMSA_county_names <- c("Bastrop","Caldwell","Hays","Travis","Williamson")
+AustinMSA_names = data.frame(county = AustinMSA_county,
+                             county_name = AustinMSA_county_names)
+
+
+ATXMSA_model_data_ <- readRDS("../Data/ATXMSA_model_data_full.rds") %>% 
+  mutate(pop_ped_wbl = white_ped + black_ped + latinx_ped,
+         pop_adu_wbl = white_adu + black_adu + latinx_adu,
+         pop_other = pop_total - pop_blacknh - pop_white - pop_latinx,
+         share_white = pop_white/pop_total) %>%
+  dplyr::select(-c(STATEFP:TRACTCE,NAME:ped_pop_17,white_ped:OP_latinx))
+
+
+Asthma_ED_counts <- readRDS("../Data/AsthmaED_wbl_GEOIDcounts.rds") %>%
+  dplyr::filter(wbl & county %in% AustinMSA_county) %>%
+  pivot_wider(names_from = c(age_group,year), values_from = ED) %>%
+  mutate(ED_ped_wbl = rowSums(across(c("Pediatric_2016","Pediatric_2017")), na.rm=T),
+         ED_adu_wbl = rowSums(across(c("Adult_2016","Adult_2017")), na.rm=T),
+         ED_wbl = rowSums(across(c("ED_ped_wbl","ED_adu_wbl")))
+ ) %>%
+  ungroup()  %>%
+  dplyr::select(-c(wbl))
+
+#NOTE: there are 34 GEOIDs in the THCIC data that aren't in the tidycensus-based geometry. These account for 58 records in the smaller ATX counties (055, 021, 209)
+    # check <- Asthma_ED_counts %>%
+    #   dplyr::filter(!(GEOID %in% ATXMSA_model_data_$GEOID))
+    # unique(check$county)
+    # sum(check$ED_wbl)
+
+ATXMSA_model_data <- ATXMSA_model_data_ %>%
+  left_join(., Asthma_ED_counts, by = "GEOID")
+
+sd_scales <- ATXMSA_model_data %>% 
+  st_drop_geometry() %>% 
+  dplyr::summarize(across(no2:co, ~sd(.x, na.rm = T)))
+
+pol_labels = c(expression('NO'['2']*' (ppb)'),
+               "Ozone (ppb)",
+               expression('PM'['10']*' ('*mu*'g/m'^'3'*')'),
+               expression('PM'['2.5']*' ('*mu*'g/m'^'3'*')'),
+               expression('SO'['2']*' (ppb)'),
+               "CO (ppb)")
+
+```
+
+```{r check Native American population total}
+# ACS_names_list <- load_variables(2017, "acs5", cache = TRUE)
+# write_csv(ACS_names_list,"./Model checks/ACS_names.csv")
+
+native_share_16 <- get_acs(geography = "tract",
+                     variables = c("B01001_001","B01001C_001"),
+                     state = "Texas",
+                     county = AustinMSA_county,
+                     year = 2016,
+                     survey = "acs5",
+                     output = "wide")
+
+native_share_17 <- get_acs(geography = "tract",
+                     variables = c("B01001_001","B01001C_001"),
+                     state = "Texas",
+                     county = AustinMSA_county,
+                     year = 2017,
+                     survey = "acs5",
+                     output = "wide")
+
+
+sum(native_share_16$B01001C_001E)
+sum(native_share_17$B01001C_001E)
+
+sum(native_share_16$B01001_001E)
+sum(native_share_17$B01001_001E)
+
+sum(native_share_16$B01001C_001E,native_share_17$B01001C_001E)/sum(native_share_16$B01001_001E,native_share_17$B01001_001E)
+
+sum(ATXMSA_model_data$total)
+
+ATXMSA_model_data %>%
+  group_by(county) %>%
+  summarise(ped_total = sum(ED_ped_wbl),
+            adu_total = sum(ED_adu_wbl),
+            total = sum(ED_wbl)
+  )
+```
+
+```{r create summary tables 1 and 2}
+# IQR_fn <- function(dat){
+#   quants <- quantile(dat,probs=c(.25,.75))
+#   IQR <- quants[2]-quants[1]
+#   IQR
+# }
+
+Table1 <- ATXMSA_model_data %>% 
+  st_drop_geometry() %>% 
+  filter(pop_total > 0) %>% 
+  mutate(share_other = 1 - (share_blacknh + share_hispanic + share_white),
+         avg_annual_pop = pop_total/2,
+         avg_annual_pop_ped = ped_total/2,
+         avg_annual_pop_adu = adu_total/2) %>% 
+  summarise(mean = across(c(avg_annual_pop,avg_annual_pop_ped,avg_annual_pop_adu,
+                            share_blacknh,share_hispanic,share_other,share_white),
+                   ~mean(.x, na.rm = T)),
+            sd = across(c(avg_annual_pop,avg_annual_pop_ped,avg_annual_pop_adu,
+                            share_blacknh,share_hispanic,share_other,share_white),
+                   ~sd(.x, na.rm = T)),
+            IQR = across(c(avg_annual_pop,avg_annual_pop_ped,avg_annual_pop_adu,
+                            share_blacknh,share_hispanic,share_other,share_white),
+                   ~IQR(.x, na.rm = T)),
+            min = across(c(avg_annual_pop,avg_annual_pop_ped,avg_annual_pop_adu,
+                            share_blacknh,share_hispanic,share_other,share_white),
+                   ~min(.x, na.rm = T)),
+            max = across(c(avg_annual_pop,avg_annual_pop_ped,avg_annual_pop_adu,
+                            share_blacknh,share_hispanic,share_other,share_white),
+                   ~max(.x, na.rm = T)),
+            sum = across(c(avg_annual_pop,avg_annual_pop_ped,avg_annual_pop_adu,
+                            share_blacknh,share_hispanic,share_other,share_white),
+                   ~sum(.x, na.rm = T)),
+            na_count = across(c(avg_annual_pop,avg_annual_pop_ped,avg_annual_pop_adu),
+                   ~sum(is.na(.x)))
+  )
+
+sd(ATXMSA_model_data$share_blacknh, na.rm = T)
+
+
+write.csv(x = Table1,
+          file = "./Updated Output/Table1.csv")
+
+
+Table1b <- ATXMSA_model_data %>% 
+  st_drop_geometry() %>%
+  summarise(total_share_blacknh = sum(pop_blacknh)/sum(pop_total),
+            total_share_latinx = sum(pop_latinx)/sum(pop_total),
+            total_share_other = sum(pop_other)/sum(pop_total),
+            total_share_white = sum(pop_white)/sum(pop_total)
+  )
+write.csv(x=Table1b, file="./Updated Output/Table1b.csv")
+
+sum(ATXMSA_model_data$total)/2
+sum(ATXMSA_model_data$ped_total)/2
+sum(ATXMSA_model_data$adu_total)/2
+
+
+## For the future: if you include the fractions in the "across" function
+# it does something weird and gives the wrong answer. Use mutate first!
+Table2 <- ATXMSA_model_data %>%
+  st_drop_geometry() %>%
+  filter(pop_wbl>0) %>% 
+  mutate(wbl_total_PBIR = ED_wbl/pop_wbl*10000,
+         wbl_ped_PBIR = ED_ped_wbl/pop_ped_wbl*10000,
+         wbl_adu_PBIR = ED_adu_wbl/pop_adu_wbl*10000) %>% 
+  summarise(mean = across(c(wbl_total_PBIR,
+                            wbl_ped_PBIR,
+                            wbl_adu_PBIR),
+                   ~mean(.x, na.rm = T)),
+            sd = across(c(wbl_total_PBIR,
+                            wbl_ped_PBIR,
+                            wbl_adu_PBIR),
+                   ~sd(.x, na.rm = T)),
+            IQR = across(c(wbl_total_PBIR,
+                            wbl_ped_PBIR,
+                            wbl_adu_PBIR),
+                   ~IQR(.x, na.rm = T)),
+            min = across(c(wbl_total_PBIR,
+                            wbl_ped_PBIR,
+                            wbl_adu_PBIR),
+                   ~min(.x, na.rm = T)),
+            sum = across(c(ED_wbl,
+                           ED_ped_wbl,
+                           ED_adu_wbl),
+                   ~sum(.x, na.rm = T))
+  )
+
+
+write.csv(x=Table2, file = "./Updated Output/Table2.csv")
+
+#The maximums are weird if you include this one low-population tract with 0 children...
+ct2 <- ATXMSA_model_data %>%
+  st_drop_geometry() %>%
+  filter(ped_total>0) %>% 
+  mutate(wbl_total_PBIR = ED_wbl/pop_wbl*10000,
+         wbl_ped_PBIR = ED_ped_wbl/pop_ped_wbl*10000,
+         wbl_adu_PBIR = ED_adu_wbl/pop_adu_wbl*10000) %>%
+  summarise(max = across(c(wbl_total_PBIR,
+                            wbl_ped_PBIR,
+                            wbl_adu_PBIR),
+                   ~max(.x, na.rm = T)))
+
+max(ct2$wbl_ped_PBIR, na.rm = T)
+write.csv(ct2, "./QAQC output/CheckingPBIR.csv")
+
+mean(ATXMSA_model_data$OP_total/ATXMSA_model_data$pop_total, na.rm = T)
+mean(ATXMSA_model_data$ED_wbl/ATXMSA_model_data$pop_wbl, na.rm = T)
+mean(ATXMSA_model_data$ED_ped_wbl/ATXMSA_model_data$pop_ped_wbl, na.rm = T)
+# 
+# 
+# sum(ATXMSA_model_data$OP_wbl)/sum(ATXMSA_model_data$pop_wbl)
+# sum(ATXMSA_model_data$OP_wbl_adu)/sum(ATXMSA_model_data$pop_adu_wbl)*10000
+# sum(ATXMSA_model_data$OP_wbl_ped)/sum(ATXMSA_model_data$pop_ped_wbl)*10000
+```
+
+```{r check totals vs wbl}
+Asthma_ED_counts_total <- readRDS("../Data/AsthmaED_all_GEOIDcounts.rds") %>%
+  dplyr::filter(county %in% AustinMSA_county) %>%
+  pivot_wider(names_from = c(age_group,year), values_from = ED) %>%
+  mutate(ED_ped_total = rowSums(across(c("Pediatric_2016","Pediatric_2017")), na.rm=T),
+         ED_adu_total = rowSums(across(c("Adult_2016","Adult_2017")), na.rm=T),
+         ED_total = rowSums(across(c("ED_ped_total","ED_adu_total")))
+ ) %>%
+  ungroup()
+
+ATX_ED_totals <- ATXMSA_model_data_ %>%
+  left_join(., Asthma_ED_counts_total, by = "GEOID")
+
+#For Aquiel
+THCIC_for_SFP <- ATX_ED_totals %>%
+  st_drop_geometry(.) %>%
+  dplyr::select(GEOID,adu_total:pop_total,ED_ped_total:ED_total)
+saveRDS(THCIC_for_SFP,"../Data/Output_for_Aquiel.RDS")
+asthma_data<- readRDS("../Data/Output_for_Aquiel.RDS")
+
+#For Cory HEI
+hist(Asthma_ED_counts_total$ED_total)
+
+# Create the density plot
+ggplot(Asthma_ED_counts_total, aes(x = ED_total)) +
+  geom_density(fill = "blue", alpha = 0.4, bw = 0.5) +  # Adjust bw for more detail
+  labs(title = "Smoothed Frequency of Asthma ED Counts",
+       x = "ED Visits Count",
+       y = "Density") +
+  theme_minimal()
+
+
+sum(ATX_ED_totals$ED_total, na.rm = T)
+sum(ATX_ED_totals$ED_adu_total, na.rm = T)
+sum(ATX_ED_totals$ED_ped_total, na.rm = T)
+
+ATX_ED_totals$ED_total - ATXMSA_model_data$ED_wbl
+(ATX_ED_totals$ED_total - ATXMSA_model_data$ED_wbl)/ATX_ED_totals$ED_total
+sum(ATX_ED_totals$ED_total, na.rm = T) - sum(ATXMSA_model_data$ED_wbl, na.rm = T)
+
+
+
+ATXMSA_model_data %>% 
+  st_drop_geometry() %>%
+  left_join(., AustinMSA_names, by = "county") %>%
+  group_by(county_name) %>% 
+  dplyr::summarize(sum(pop_total)/2)
+
+ATX_ED_counts_total <- Asthma_ED_counts_total %>% dplyr::filter(county == "453")
+a1 <- sum(ATX_ED_counts_total$Adult_2016, na.rm = T)
+a2 <- sum(ATX_ED_counts_total$Adult_2017, na.rm = T)
+a3 <- sum(ATX_ED_counts_total$Pediatric_2016, na.rm = T)
+a4 <- sum(ATX_ED_counts_total$Pediatric_2017, na.rm = T)
+
+(a1+a2+a3+a4)/2
+```
+
+## Calculating weighted summary stats
+
+```{r Table E1}
+pop_pollution_long <- ATXMSA_model_data %>% 
+  st_drop_geometry() %>% 
+  #filter(COUNTYFP == "453") %>% 
+  dplyr::select(c("GEOID", no2:co)) %>% 
+  pivot_longer(cols = no2:co, names_to = "pollutant", values_to = "concentration") %>% 
+  left_join(., ATXMSA_model_data %>% 
+              st_drop_geometry() %>% 
+              dplyr::select(c("GEOID",total:pop_latinx,pop_other)),
+            by = "GEOID") %>% 
+  pivot_longer(cols = total:pop_other, names_to = "population", values_to = "weight")
+
+pop_pollution_summary <- pop_pollution_long %>% 
+  group_by(pollutant, population) %>% 
+  dplyr::summarise(means = weighted.mean(x=concentration,w=weight),
+            medians = weighted.median(x=concentration,w=weight),
+            lowerdec = weighted.quantile(x=concentration,w=weight,probs = .10),
+            upperdec = weighted.quantile(x=concentration,w=weight,probs = .90),
+            weighted_sd = sqrt(wtd.var(x=concentration,weights=weight))) 
+write.csv(pop_pollution_summary, "./Updated Output/Table_E1.csv", row.names = F)
+pop_pollution_summary %>% dplyr::filter(pollutant == "o3")
+
+unwtd_pollution_summary <- pop_pollution_long %>% 
+  group_by(pollutant) %>% 
+  dplyr::summarise(means = mean(x=concentration, na.rm = T),
+            medians = median(x=concentration,  na.rm = T),
+            lowerdec = quantile(x=concentration,probs = .10,na.rm = T),
+            upperdec = quantile(x=concentration,probs = .90, na.rm = T),
+            sd = sd(x=concentration, na.rm = T)) 
+  
+
+```
+
+```{r Table E2}
+cor(ATXMSA_model_data %>% 
+      dplyr::select(no2:co) %>% 
+      st_drop_geometry(),
+    use = "complete.obs")
+```
+
+```{r validate output with map, echo=FALSE}
+MSA_bounds <- st_bbox(ATXMSA_model_data %>% 
+                        #filter(COUNTYFP == "453") %>% 
+                         st_transform(st_crs(4326)))
+
+# MSA_bgkdmap <- get_stamenmap(bbox=c(left = as.numeric(MSA_bounds$xmin),
+#                                     bottom = as.numeric(MSA_bounds$ymin),
+#                                     right = as.numeric(MSA_bounds$xmax),
+#                                     top = as.numeric(MSA_bounds$ymax)),
+#                              zoom = 9,
+#                              maptype = "toner-labels")
+```
+
+```{r save maps of four pollutants Fig E1, echo=FALSE}
+poll_map <- ggmap(ATX_bkgdmap) +
+    geom_sf(data = ATXMSA_model_data %>% 
+              #filter(COUNTYFP == "453") %>%
+              st_transform(st_crs(4326)),
+            inherit.aes = F, aes(fill = pm25),
+          alpha = .7, lwd = 0.1, color = NA) +
+    scale_fill_viridis(#limits = c(.3,.8),
+                     #name = "µg m^-3",
+                    name = "",
+                     option = "plasma",
+                     direction = -1) +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank())
+ggsave("./graphics/so2_map.pdf",
+       poll_map, width = 3, height = 3, units = "in", scale = 2)
+```
+
+```{r population boxplot figE2}
+full_population <- pop_pollution_long %>% 
+  dplyr::filter(population %in% c("pop_black","pop_white","pop_latinx","pop_other")) %>% 
+  dplyr::filter(pollutant %in% c("no2","pm10","pm25","so2")) %>% 
+  mutate(population = factor(population, 
+                             levels = c("pop_total","pop_other","pop_white","pop_latinx","pop_black")),
+  population = recode(population,
+                      pop_total="Total",pop_black="Black",
+                      pop_latinx="Latinx",pop_white="White",pop_other="AAPI/NatAM/Other"))
+
+full_pop_boxplots <- ggplot(full_population) +
+  geom_boxplot(aes(x = concentration, y = population, color = population, weight = weight)) +
+  facet_wrap(~pollutant, ncol = 1, scales = "free") #+
+  #coord_flip()
+
+ggsave("./Updated Output/FigureE2.pdf",
+       units = "in", width = 3, height = 2, scale = 2)
+# ggsave("../Draft/graphics/boxplots_by_race_4.pdf",
+#        full_pop_boxplots)
+```
+
+##CARBayes model runs: Setup
+
+### Set up adjacency matrix
+```{r transform vars and make adjacency W}
+spatial_test <- ATXMSA_model_data %>% 
+ filter(!is.na(no_vehicle) & pop_black != 0 & pop_adu_wbl > 0 & pop_ped_wbl > 0) %>% 
+  # filter(!is.na(no_vehicle) & pop_black != 0 & COUNTYFP == "453") %>% 
+  mutate(no2_u = no2,
+         o3_u = o3,
+         pm10_u = pm10,
+         pm25_u = pm25,
+         so2_u = so2,
+         co_u = co,
+         no2 = (no2 - mean(no2))/sd(no2),
+         o3 = (o3 - mean(o3))/sd(o3),
+         pm10 = (pm10 - mean(pm10))/sd(pm10),
+         pm25 = (pm25 - mean(pm25))/sd(pm25),
+         so2 = (so2 - mean(so2))/sd(so2),
+         co = (co - mean(co))/sd(co),
+         poverty = poverty * 10,
+         no_vehicle = no_vehicle * 10,
+         less_than_HS = less_than_HS * 10,
+         gas_heating = gas_heating * 10,
+         crowding = crowding * 10,
+         attached_10 = attached_10 * 10,
+         less2_bed = less2_bed * 10,
+         share_hispanic = share_hispanic * 10,
+         share_blacknh = share_blacknh * 10)
+no_nb_check <- poly2nb(spatial_test, row.names = spatial_test$GEOID, queen = TRUE)
+spatial_test = subset(spatial_test, subset = card(no_nb_check) > 0)
+W.nb <- poly2nb(spatial_test, row.names = spatial_test$GEOID, queen = TRUE)
+W.list <- nb2listw(W.nb, style = "B")
+W <- nb2mat(W.nb, style="B")
+```
+
+#### Define model formula lists
+```{r create lists of model formulae}
+#For Table E3, Incidence Risk Ratio for asthma associated  census tract share of Black and Hispanic/Latinx not accounting for other covariates
+form_TabE3 <- ED_target ~ offset(pop_offset) +
+    share_blacknh + share_hispanic
+
+#For Table 3 and E4, IRR for ED visits, race/eth and SES/housing covariates
+form_Tab3 <- ED_target ~ offset(pop_offset) +
+    share_blacknh + share_hispanic +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+
+#For Table 4,
+# 4a: NO2
+form_Tab4a <- ED_target ~ offset(pop_offset) +
+    no2 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+# 4b: PM2.5
+form_Tab4b <- ED_target ~ offset(pop_offset) +
+    pm25 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+# 4c: PM10
+form_Tab4c <- ED_target ~ offset(pop_offset) +
+    pm10 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+# 4d: SO2
+form_Tab4d <- ED_target ~ offset(pop_offset) +
+    so2 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+# 4e: multipollutant
+form_Tab4e <- ED_target ~ offset(pop_offset) +
+    no2 + pm25 + pm10 + so2 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+
+#For Figure 1, PM2.5 and SO2 interaction
+form_Fig1 <- ED_target ~ offset(pop_offset) +
+    pm25+so2+pm25*so2 +
+    share_blacknh + share_hispanic +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+
+#For Table 5,
+# 5a: NO2
+form_Tab5a <- ED_target ~ offset(pop_offset) +
+    share_blacknh + share_hispanic +
+    no2 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+# 5b: PM2.5
+form_Tab5b <- ED_target ~ offset(pop_offset) +
+    share_blacknh + share_hispanic +
+    pm25 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+# 5c: PM10
+form_Tab5c <- ED_target ~ offset(pop_offset) +
+    share_blacknh + share_hispanic +
+    pm10 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+# 5d: SO2
+form_Tab5d <- ED_target ~ offset(pop_offset) +
+    share_blacknh + share_hispanic +
+    so2 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+# 5e: multipollutant
+form_Tab5e <- ED_target ~ offset(pop_offset) +
+    share_blacknh + share_hispanic +
+    no2 + pm25 + pm10 + so2 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+
+#Ozone
+form_ozoneSens_single <- ED_target ~ offset(pop_offset) +
+    o3 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+form_ozoneSens_multi <- ED_target ~ offset(pop_offset) +
+    no2 + pm25 + pm10 + so2 + o3 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+form_ozoneAtten_single <- ED_target ~ offset(pop_offset) +
+    share_blacknh + share_hispanic +
+    o3 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+form_ozoneAtten_multi <- ED_target ~ offset(pop_offset) +
+    share_blacknh + share_hispanic +
+    no2 + pm25 + pm10 + so2 + o3 +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+
+poiss_forms = list(form_TabE3 = form_TabE3, 
+                   form_Tab3 = form_Tab3,
+                   form_Tab4a = form_Tab4a,
+                   form_Tab4b = form_Tab4b,
+                   form_Tab4c = form_Tab4c,
+                   form_Tab4d = form_Tab4d,
+                   form_Tab4e = form_Tab4e,
+                   form_Fig1 = form_Fig1,
+                   form_Tab5a = form_Tab5a,
+                   form_Tab5b = form_Tab5b,
+                   form_Tab5c = form_Tab5c,
+                   form_Tab5d = form_Tab5d,
+                   form_Tab5e = form_Tab5e)
+
+#For Figure E3, separate set of formulas for Gaussian models
+form_FigE3a <- no2 ~
+    share_blacknh + share_hispanic +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+form_FigE3b <- pm25 ~
+    share_blacknh + share_hispanic +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+form_FigE3c <- pm10 ~
+    share_blacknh + share_hispanic +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+form_FigE3d <- so2 ~
+    share_blacknh + share_hispanic +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+form_ozoneSensitivity_re <- o3 ~
+    share_blacknh + share_hispanic +
+    poverty+no_vehicle+less_than_HS+
+    gas_heating+crowding+attached_10+less2_bed
+
+gauss_forms <- list(form_FigE3a = form_FigE3a,
+                    form_FigE3b = form_FigE3b,
+                    form_FigE3c = form_FigE3c,
+                    form_FigE3d = form_FigE3d)
+
+ozone_forms <- list(form_ozoneSens_single,
+                    form_ozoneSens_multi,
+                    form_ozoneAtten_single,
+                    form_ozoneAtten_multi,
+                    form_ozoneSensitivity_re)
+```
+
+
+##CARBayes model runs: Specify and execute model
+
+#### Select population (full, pediatric, adult) and formula
+```{r }
+numCores <- detectCores()
+IRR_holder <- list()
+Moran_holder <- list()
+beta_samples_holder <- list()
+
+```
+
+
+```{r set parameters}
+##This step specifies total, adult, or pediatric population
+alt_model_set <- spatial_test %>% 
+  mutate(ED_target = ED_adu_wbl, #ED_wbl, ED_ped_wbl, ED_adu_wbl 
+         pop_offset = log(pop_adu_wbl)) #pop_wbl, pop_ped_wbl, pop_adu_wbl
+
+longer_chain_factor = 1
+spat_mod_option = F
+model_family_option = "poisson" #"poisson" or "gaussian"
+# model_num <- 9
+
+for(model_num in 1:4){
+  formalt <- poiss_forms[[model_num]] #poiss_forms[[model_num]] #poiss_forms or gauss_forms
+  #### Define CARBayes function to run within parallel command
+  ##### r set up parallel CARleroux runs}
+  form_terms <- attr(terms(formalt), which = "term.labels")
+  irr_range <- 2:(length(form_terms) + 1)
+  
+  if(spat_mod_option == T){
+    fx <- function(iter = iter){
+    chain_out <- S.CARleroux(formula = formalt,
+                          data = alt_model_set,
+                          family = model_family_option,
+                          W = W,
+                          burnin = 20000*longer_chain_factor,
+                          n.sample = 100000*longer_chain_factor,
+                          thin = 100*longer_chain_factor,
+                          verbose = T)
+    chain_out
+    }
+  }else{
+  ## alternative: run with glm
+    fx <- function(iter = iter){
+    chain_out <- S.glm(formula = formalt,
+                          data = alt_model_set,
+                          family = model_family_option,
+                          burnin = 20000*longer_chain_factor,
+                          n.sample = 100000*longer_chain_factor,
+                          thin = 100*longer_chain_factor,
+                          verbose = T)
+    chain_out
+    }
+  }
+  
+  #### Run 8 chains in parallel
+  system.time(
+    chain_list <- mclapply(1:8, fx, mc.cores = numCores)
+  )
+  
+  #### Check the convergence of all of the chains together
+  # beta is the intercept estimate.
+  beta_samples <- mcmc.list(chain_list[[1]]$samples$beta, 
+                            chain_list[[2]]$samples$beta, 
+                            chain_list[[3]]$samples$beta,
+                            chain_list[[4]]$samples$beta, 
+                            chain_list[[5]]$samples$beta, 
+                            chain_list[[6]]$samples$beta,
+                            chain_list[[7]]$samples$beta, 
+                            chain_list[[8]]$samples$beta)
+  beta_samples_holder[[model_num]] <- beta_samples
+  gelman.diag(beta_samples)
+  # plot(beta_samples)
+  
+  if(spat_mod_option == T){
+  # tau2 is conditional variance of the spatial random effect
+  tau2_samples <- mcmc.list(chain_list[[1]]$samples$tau2, 
+                            chain_list[[2]]$samples$tau2, 
+                            chain_list[[3]]$samples$tau2,
+                            chain_list[[4]]$samples$tau2, 
+                            chain_list[[5]]$samples$tau2, 
+                            chain_list[[6]]$samples$tau2,
+                            chain_list[[7]]$samples$tau2, 
+                            chain_list[[8]]$samples$tau2)
+  
+  # rho is a measure of the strength of spatial correlation, rho=1 means very strong spatial relationship, rho=0 means independence (no spatial).
+  rho_samples <- mcmc.list(chain_list[[1]]$samples$rho, 
+                           chain_list[[2]]$samples$rho, 
+                           chain_list[[3]]$samples$rho,
+                           chain_list[[4]]$samples$rho, 
+                           chain_list[[5]]$samples$rho, 
+                           chain_list[[6]]$samples$rho,
+                           chain_list[[7]]$samples$rho, 
+                           chain_list[[8]]$samples$rho)
+  # print(gelman.diag(tau2_samples))
+  # print(gelman.diag(rho_samples))
+  # 
+  # plot(tau2_samples)
+  # plot(rho_samples)
+  }
+  
+  ### Record Incidence Risk Ratios
+  beta.samples.matrix0 <- rbind(chain_list[[1]]$samples$beta, 
+                                chain_list[[2]]$samples$beta,
+                                chain_list[[3]]$samples$beta,
+                                chain_list[[4]]$samples$beta, 
+                                chain_list[[5]]$samples$beta,
+                                chain_list[[6]]$samples$beta,
+                                chain_list[[7]]$samples$beta, 
+                                chain_list[[8]]$samples$beta)
+  colnames(beta.samples.matrix0) <- colnames(chain_list[[1]]$X)
+  combined_betas <- round(t(apply(beta.samples.matrix0, 2, quantile, c(.5, .025, .975))),3)
+  IRR <- exp((combined_betas[irr_range,]))
+  
+  IRR_holder[[model_num]] <- IRR
+  
+  # combined_betas
+  
+  
+  # check for spatial pattern in residuals}
+  fitted.samples.matrix <- rbind(chain_list[[1]]$samples$fitted, 
+        chain_list[[2]]$samples$fitted,
+        chain_list[[3]]$samples$fitted,
+        chain_list[[4]]$samples$fitted, 
+        chain_list[[5]]$samples$fitted,
+        chain_list[[6]]$samples$fitted,
+        chain_list[[7]]$samples$fitted, 
+        chain_list[[8]]$samples$fitted)
+  combined_fitted <- apply(fitted.samples.matrix, 2, quantile, c(.5))
+  
+  alt_model_set$residuals <- alt_model_set$ED_target - combined_fitted
+  # alt_model_set$residuals <- alt_model_set$pm25 - combined_fitted
+  
+  
+  # resid_map <- ggmap(ATX_bkgdmap) +
+  #     geom_sf(data = alt_model_set %>%
+  #               st_transform(st_crs(4326)),
+  #             inherit.aes = F, aes(fill = residuals),
+  #           alpha = .7, lwd = 0.1, color = NA) +
+  #     scale_fill_viridis(direction = -1) +
+  #   theme(axis.text = element_blank(),
+  #         axis.ticks = element_blank(),
+  #         axis.title = element_blank())
+  # resid_map
+  
+  Moran_holder[[model_num]] <- moran.mc(x = alt_model_set$residuals, listw = W.list, nsim = 5000)
+}
+```
+
+```{r save output from model runs}
+# sink("./Model checks/poisson_formulas.txt")
+# print(poiss_forms)
+# sink()
+
+# sink("./Model checks/IRR_allages.txt")
+# sink("./Model checks/IRR_ped.txt")
+# sink("./Model checks/IRR_adu.txt")
+# IRR_holder
+# sink()
+
+# sink("./Model checks/MoranI_allages.txt")
+# sink("./Model checks/MoranI_ped.txt")
+# sink("./Model checks/MoranI_adu.txt")
+# Moran_holder
+# sink()
+
+# saveRDS(IRR_holder,"./Model checks/IRR_allages.rds")
+# saveRDS(Moran_holder,"./Model checks/MoranStat_allages.rds")
+# saveRDS(beta_samples_holder,"./Model checks/beta_samples_allages.rds")
+# saveRDS(IRR_holder,"./Model checks/IRR_ped.rds")
+# saveRDS(Moran_holder,"./Model checks/MoranStat_ped.rds")
+# saveRDS(beta_samples_holder,"./Model checks/beta_samples_ped.rds")
+# saveRDS(IRR_holder,"./Model checks/IRR_adu.rds")
+# saveRDS(Moran_holder,"./Model checks/MoranStat_adu.rds")
+# saveRDS(beta_samples_holder,"./Model checks/beta_samples_adu.rds")
+```
+
+
+
+### Figure E3
+```{r forest plot for Fig E3}
+for_graphics <- data.frame(combined_betas[irr_range,]) %>% 
+  mutate(variables = factor(rownames(combined_betas[irr_range,]), levels = rownames(combined_betas[irr_range,])))
+
+poll_beta_chart <- ggplot(data=for_graphics,
+       aes(x = variables, y = X50., ymin = X2.5., ymax = X97.5.)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0) +
+  ylab("Coefficient (95% CI)") +
+  # ggtitle(expression("SO"["2"])) + #"PM"["2.5"]
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+poll_beta_chart
+# ggsave("./graphics/so2_fn_of_ACS.pdf",
+#        units = "in", width = 6.5, height = 2, scale = 1)
+```
+
+### Figure 1: PM*SO2 interaction effects
+```{r calculate IRR for interaction effects}
+pm_quantiles <- weighted.quantile(x=ATXMSA_model_data$pm25,
+                                  w=ATXMSA_model_data$pop_wbl,
+                                  probs = c(0,.25,.5,.75,1))
+so2_quantiles <- weighted.quantile(x=ATXMSA_model_data$so2,
+                                  w=ATXMSA_model_data$pop_wbl,
+                                  probs = c(0,.25,.5,.75,1))
+pm_sd <- sd(ATXMSA_model_data$pm25, na.rm = T)
+so2_sd <- sd(ATXMSA_model_data$so2, na.rm = T)
+
+pm_column = 2
+so2_column = 3
+interaction_column = 13
+group = "Total"
+
+pm_effect = data.frame(median = rep(NA,5),
+                       lower = rep(NA,5),
+                       upper = rep(NA,5))
+for(q_value in 1:5){
+  pm_effect_matrix <- exp(beta.samples.matrix0[,pm_column] + beta.samples.matrix0[,interaction_column]*(so2_quantiles[q_value]/so2_sd))
+  pm_effect[q_value,] <- c(median(pm_effect_matrix),
+                           quantile(pm_effect_matrix, 0.025),
+                           quantile(pm_effect_matrix, 0.975))
+}
+
+so2_effect = data.frame(median = rep(NA,5),
+                       lower = rep(NA,5),
+                       upper = rep(NA,5))
+for(q_value in 1:5){
+  so2_effect_matrix <- exp(beta.samples.matrix0[,so2_column] + beta.samples.matrix0[,interaction_column]*(pm_quantiles[q_value]/pm_sd))
+  so2_effect[q_value,] <- c(median(so2_effect_matrix),
+                           quantile(so2_effect_matrix, 0.025),
+                           quantile(so2_effect_matrix, 0.975))
+}
+
+pm_effect$pollutant = "PM2.5"
+so2_effect$pollutant = "SO2"
+# write.csv(rbind(pm_effect, so2_effect),
+#           paste0("./Graphics/SO2_PM_interaction/",formula_number,group,".csv"))
+
+
+pm_effect$so2_quartiles <- as.character(round(so2_quantiles,2))
+so2_effect$pm_quartiles <- as.character(round(pm_quantiles,2))
+```
+
+```{r plot IRR for interaction effects}
+pm_plot <- ggplot(pm_effect, aes(x = so2_quartiles, y = median)) +
+  geom_point()+
+  geom_errorbar(aes(ymin=lower,ymax=upper, width=.1)) +
+  labs(y="PM2.5 IRR for SO2 quartile",
+       x="SO2 quartile bounds (ppb)"#,
+       #title="PM2.5 IRR interaction with SO2"
+       ) +
+  geom_hline(yintercept = 1) 
+ggsave("./Updated Output/Fig1_PMxSO2_adu.pdf",
+       pm_plot, height = 2, width = 3, scale = 1)
+
+# so2_plot <- ggplot(so2_effect, aes(x = pm_quartiles, y = median)) +
+#   geom_point()+
+#   geom_errorbar(aes(ymin=lower,ymax=upper, width=.1)) +
+#   labs(y="SO2 IRR for PM2.5 quartile",
+#        x="PM2.5 quartile bounds"#,
+#        #title="SO2 IRR interaction with PM2.5"
+#        ) +
+#   geom_hline(yintercept = 1) 
+# ggsave("../Draft/graphics/SO2_int_adu.png",
+#        so2_plot, height = 1, width = 1, scale = 2.25)
+```
+
+
+### Figure 2: Attenuation graphic
+```{r visualize attenuation setup}
+mod_factors <- factor(c("Orig","NO2","PM2.5","PM10","SO2","Multi"))
+mod_factors <-  factor(mod_factors, levels = c("Orig","NO2","PM25","PM10","SO2","Multi"))
+
+atten_table <- read.csv("./Updated Output/Attenuation_revised.csv") %>% 
+  mutate(mod_factor = factor(model, levels = c("Orig","NO2","PM25","PM10","SO2","Multi")),
+         pop_factor = factor(pop, levels = c("all","ped","adu"),
+                            labels = c("All Ages","Pediatric","Adult")),
+         race_eth_factor = factor(raceth, labels = c("Black","Latinx"))
+         )
+
+```
+
+```{r visualize attenuation}
+names_to_loop <- unique(atten_table$pop_factor)
+ages_filenames <- c("all","ped","adu")
+race_eth_to_loop <- unique(atten_table$race_eth_factor)
+race_filenames <- c("b","l")
+
+for(i in 1:length(names_to_loop)){
+  for(j in 1:length(race_eth_to_loop)){
+    chart_data <- atten_table %>% 
+      filter(pop_factor == names_to_loop[i] & race_eth_factor == race_eth_to_loop[j])
+    orig_line <- chart_data %>% filter(mod_factor == "Orig")
+    med_line <- orig_line$med
+    low_line <- orig_line$lower
+    upp_line <- orig_line$upper
+    
+    atten_chart <- ggplot(data=chart_data) +
+      geom_rect(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = med_line, alpha = 0.1) +
+      geom_pointrange(aes(x = mod_factor, y = med, ymin = lower, ymax = upper)) +
+      geom_hline(yintercept = med_line) +
+      geom_hline(yintercept = low_line, linetype = "dotted") +
+      geom_hline(yintercept = upp_line, linetype = "dotted") +
+      #ggtitle("% Black, All ages PBIR") +
+      ylab("") +
+      scale_y_continuous(labels = scales::number_format(accuracy = 0.1),
+                         limits = c(1, low_line+.05))+
+      theme(axis.title.x = element_blank(),
+            axis.text.x = element_text(angle = 30, hjust = 1))
+    atten_chart
+    ggsave(paste0("./Updated Output/atten_",race_filenames[j],
+                  "_",ages_filenames[i],".pdf"),
+           units = "in", width = 3, height = 2, scale = 1)
+  }
+}
+
+```
+
+
+### IRR tree plot (not used)
+```{r tree plot for IRR}
+model_num <- 2
+IRR <- IRR_holder[[model_num]]
+for_graphics <- data.frame(IRR) %>% 
+  mutate(variables = factor(rownames(IRR), levels = rownames(IRR)))
+IRR_chart <- ggplot(data=for_graphics,
+       aes(x = variables, y = X50., ymin = X2.5., ymax = X97.5.)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 1) +
+  ylab("IRR (95% Credible Interval)") +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+IRR_chart  
+# ggsave("../Draft/graphics/adu_re_pol_ses.png",
+       # units = "in", width = 2, height = 1, scale = 3)
+```

@@ -98,3 +98,14 @@ ACS2016 <- get_acs(
 
 ```
 
+
+ACSChildPopCensus2010 <- read_excel('Neighborhood Data/Census 2010/ACS2013ChildPopulationCensus2010.xlsx')
+
+ACSChildPopCensus2010 <- ACSChildPopCensus2010 %>% 
+  transmute(GEOID,
+            zip_pop = rowSums(across(all_of(total_child_vars)), na.rm = TRUE),
+            zip_black = rowSums(across(all_of(black_child_vars)), na.rm = TRUE),
+            zip_hisp = rowSums(across(all_of(hispanic_child_vars)), na.rm = TRUE),
+            zip_white = rowSums(across(all_of(white_child_vars)), na.rm = TRUE)
+            ) %>% rename("geoid10" = "GEOID")
+

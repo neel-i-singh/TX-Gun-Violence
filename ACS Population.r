@@ -1,112 +1,100 @@
-# install.packages(c("tidycensus", "dplyr", "tidyr", "purrr", "stringr", "readr"))
+---
+title: "TX ACS Population"
+author: "Neel Singh"
+date: "2026-03-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
 library(tidycensus)
 library(dplyr)
-library(tidyr)
 library(purrr)
-library(stringr)
-library(readr)
+library(writexl)
+```
 
-# ------------------------------------------------------------
-# One-time setup:
-# census_api_key("YOUR_CENSUS_API_KEY", install = TRUE, overwrite = TRUE)
-# ------------------------------------------------------------
 
-years <- 2016:2019
+```{r}
+# Set your Census API key
+census_api_key("1b02ea33fad73affe632747d96d0c5369450473f")#, install = TRUE)
 
-# ACS age-by-race/ethnicity tables
-# NOTE:
-# - C01001A-G are race-alone tables
-# - C01001H is White alone, not Hispanic or Latino
-# - C01001I is Hispanic or Latino
-# These are not all mutually exclusive categories.
-table_map <- c(
-  overall_total_population = "C01001",
-  white_alone = "C01001A",
-  black_alone = "C01001B",
-  aian_alone = "C01001C",
-  asian_alone = "C01001D",
-  nhpi_alone = "C01001E",
-  some_other_race_alone = "C01001F",
-  two_or_more_races = "C01001G",
-  white_alone_not_hispanic = "C01001H",
-  hispanic_or_latino = "C01001I"
+# Total child variables
+total_child_vars <- c(
+  "B01001_003E", "B01001_004E", "B01001_005E", "B01001_006E",  # Male <18
+  "B01001_027E", "B01001_028E", "B01001_029E", "B01001_030E"   # Female <18
 )
 
-get_age_counts_for_table <- function(year, table_code, group_name) {
-  # Pull variable metadata for this table/year
-  vars_meta <- load_variables(year, "acs5", cache = TRUE) %>%
-    filter(str_starts(name, paste0(table_code, "_"))) %>%
-    select(variable = name, label)
-
-  # Pull tract-level ACS data for Texas
-  dat <- get_acs(
-    geography = "tract",
-    state = "TX",
-    survey = "acs5",
-    year = year,
-    table = table_code,
-    cache_table = TRUE
-  ) %>%
-    left_join(vars_meta, by = "variable") %>%
-    mutate(
-      is_total = label == "Estimate!!Total:",
-      is_pediatric = str_detect(label, "Under 18 years$"),
-      is_adult = str_detect(label, "18 to 64 years$|65 years and over$")
-    ) %>%
-    group_by(GEOID, NAME) %>%
-    summarise(
-      year = year,
-      race_ethnicity_group = group_name,
-
-      overall = estimate[is_total][1],
-      overall_moe = moe[is_total][1],
-
-      pediatric = sum(estimate[is_pediatric], na.rm = TRUE),
-      pediatric_moe = moe_sum(moe[is_pediatric], estimate[is_pediatric]),
-
-      adult = sum(estimate[is_adult], na.rm = TRUE),
-      adult_moe = moe_sum(moe[is_adult], estimate[is_adult]),
-
-      .groups = "drop"
-    )
-
-  dat
-}
-
-# Build long file for all years and tables
-tx_tract_pop_long <- map_dfr(
-  years,
-  \(yr) {
-    imap_dfr(
-      table_map,
-      \(tbl, grp) get_age_counts_for_table(year = yr, table_code = tbl, group_name = grp)
-    )
-  }
+# Black only child variables
+black_child_vars <- c(
+  "B01001B_003E", "B01001B_004E", "B01001B_005E", "B01001B_006E",  # Male <18
+  "B01001B_018E", "B01001B_019E", "B01001B_020E", "B01001B_021E"   # Female <18
 )
 
-# Wide version: one row per tract-year, many columns
-tx_tract_pop_wide <- tx_tract_pop_long %>%
-  pivot_wider(
-    id_cols = c(GEOID, NAME, year),
-    names_from = race_ethnicity_group,
-    values_from = c(overall, overall_moe, pediatric, pediatric_moe, adult, adult_moe),
-    names_glue = "{race_ethnicity_group}_{.value}"
-  ) %>%
-  arrange(year, GEOID)
+# Hispanic child variables
+hispanic_child_vars <- c(
+  "B01001I_003E", "B01001I_004E", "B01001I_005E", "B01001I_006E",
+  "B01001I_018E", "B01001I_019E", "B01001I_020E", "B01001I_021E"
+)
 
-# Optional: rename the "overall_total_population" fields to cleaner names
-tx_tract_pop_wide <- tx_tract_pop_wide %>%
-  rename(
-    total_population = overall_total_population_overall,
-    total_population_moe = overall_total_population_overall_moe,
-    pediatric_population = overall_total_population_pediatric,
-    pediatric_population_moe = overall_total_population_pediatric_moe,
-    adult_population = overall_total_population_adult,
-    adult_population_moe = overall_total_population_adult_moe
-  )
+# White only child variables
+white_child_vars <- c(
+  "B01001A_003E", "B01001A_004E", "B01001A_005E", "B01001A_006E",
+  "B01001A_018E", "B01001A_019E", "B01001A_020E", "B01001A_021E"
+)
 
-# Write output
-write_csv(tx_tract_pop_wide, "tx_tract_population_2016_2019.csv")
+# Total adult variables
+total_adult_vars <- c(
+  "B01001_007E", "B01001_008E", "B01001_009E", "B01001_010E", "B01001_011E",  "B01001_012E", "B01001_013E", "B01001_014E", "B01001_015E", "B01001_016E", "B01001_017E", "B01001_018E", "B01001_019E", "B01001_020E", "B01001_021E", "B01001_022E", "B01001_023E", "B01001_024E", "B01001_025E", # Male > 18 
+  "B01001_031E", "B01001_032E", "B01001_033E", "B01001_034E", "B01001_035E", "B01001_036E", "B01001_037E", "B01001_038E", "B01001_039E", "B01001_040E", "B01001_041E", "B01001_042E", "B01001_043E", "B01001_044E", "B01001_045E", "B01001_046E", "B01001_047E", "B01001_048E", "B01001_049E" # Female > 18
+)
 
-# Preview
-print(tx_tract_pop_wide, n = 5)
+# Black only adult variables
+black_adult_vars <- c(
+  "B01001B_007E", "B01001B_008E", "B01001B_009E", "B01001B_010E", "B01001B_011E",  "B01001B_012E", "B01001B_013E", "B01001B_014E", "B01001B_015E", "B01001B_016E", # Male > 18 
+  "B01001B_022E", "B01001B_023E", "B01001B_024E", "B01001B_025E", "B01001B_026E", "B01001B_027E", "B01001B_028E", "B01001B_029E", "B01001B_030E", "B01001B_031E" # Female > 18
+)
+
+# Hispanic adult variables ###NEED TO ADJUST THESE CODES AND ONWARDS
+hispanic_adult_vars <- c(
+  "B01001I_007E", "B01001I_008E", "B01001I_009E", "B01001I_010E",  "B01001I_011E", "B01001I_012E", "B01001I_013E", "B01001I_014E", "B01001I_015E", "B01001I_016E", # Male > 18 
+  "B01001I_022E", "B01001I_023E", "B01001I_024E", "B01001I_025E", "B01001I_026E", "B01001I_027E", "B01001I_028E", "B01001I_029E", "B01001I_030E", "B01001I_031E" # Female > 18
+)
+
+# White only adult variables
+white_adult_vars <- c(
+  "B01001A_007E", "B01001A_008E", "B01001A_009E", "B01001A_010E", "B01001A_011E",  "B01001A_012E", "B01001A_013E", "B01001A_014E", "B01001A_015E", "B01001A_016E", # Male > 18 
+  "B01001A_022E", "B01001A_023E", "B01001A_024E", "B01001A_025E", "B01001A_026E", "B01001A_027E", "B01001A_028E", "B01001A_029E", "B01001A_030E",
+  "B01001A_031E" # Female > 18
+)
+
+# Combined list
+variables <- c(
+  total_child_vars,
+  black_child_vars,
+  hispanic_child_vars,
+  white_child_vars,
+  total_adult_vars,
+  black_adult_vars,
+  hispanic_adult_vars,
+  white_adult_vars
+)
+```
+
+```{r}
+# 2016 data
+ACS2016 <- get_acs(
+  geography = "tract",
+  state = "TX",
+  variables = variables,
+  year = 2016,        # ACS 5-year estimates (earliest is 2009–2013 window)
+  survey = "acs5",
+  output = "wide"
+)
+
+```
+

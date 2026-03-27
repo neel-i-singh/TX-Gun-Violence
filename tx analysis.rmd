@@ -1,0 +1,641 @@
+---
+title: "TX ED GV"
+author: "Neel Singh"
+date: "2026-01-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Libraries
+```{r}
+library(tidyverse)
+library(tidyverse)
+library(readxl)
+library(readr)
+library(tidyverse)
+```
+
+## Import Data
+
+# THCIC Import
+```{r}
+THCIC <- readRDS("RDS/ED_asthma.rds") %>% 
+  # Remove observations with no geolocation data and living outside of TX
+  filter(!is.na(PAT_ADDR_CENSUS_BLOCK_GROUP),
+         substr(PAT_ADDR_CENSUS_BLOCK_GROUP, 1, 2) == "48") %>%
+  # make patient age numeric and add pediatric/adult categories
+  mutate(PAT_AGE_YEARS = as.numeric(PAT_AGE_YEARS),
+         AgeCat = ifelse(PAT_AGE_YEARS < 18, "Pediatric", "Adult"))
+
+gc()
+```
+
+# ACS Covariates Import
+```{r}
+ACSCovariates <- readRDS("Covariates.rds")
+
+gc()
+```
+
+# ACS Population Import
+```{r}
+Population <- readRDS("TXPopulation.rds")
+
+gc()
+```
+
+# Shootings Import
+```{r}
+Shootings <- readRDS("ShootingsTX.rds")
+
+ShootingsAdj <- Shootings %>% left_join(Population, by = "GEOID")
+
+ShootingsAdj <- ShootingsAdj %>% select(GEOID, shootings, fatal_shootings, nonfatal_shootings, TotalPop) %>%
+  filter(TotalPop > 0) %>%
+  mutate(ShootingsPBIR = shootings / TotalPop * 10000) %>%
+  select(GEOID, ShootingsPBIR, shootings, fatal_shootings, nonfatal_shootings)
+
+gc()
+```
+
+# USDA RUCA Import
+```{r}
+RUCACensus2010 <- read_excel("RUCACensus2010.xlsx", 
+    skip = 1) %>% # rename GEOID and RUCA columns
+  rename("GEOID" = "State-County-Tract FIPS Code (lookup by address at http://www.ffiec.gov/Geocode/)",
+         "RUCA" = "Primary RUCA Code 2010") %>%
+  # select only necessary columns
+  select(GEOID, RUCA)
+
+gc()
+```
+
+# Pollution Data Import
+```{r}
+Pollution <- read_csv("CACESPollutionCensus2010.csv")
+
+Pollution <- Pollution %>% 
+  rename("GEOID" = "fips") %>%
+  mutate(GEOID = as.character(GEOID), year = as.character(year)) %>%
+  filter(year %in% c("2016", "2017", "2018", "2019")) %>%
+  select(GEOID, pollutant, pred_wght) %>%
+  group_by(GEOID, pollutant) %>%
+  summarise(pred_wght = mean(pred_wght, na.rm = T
+  ), .groups = "drop") %>%
+  pivot_wider(names_from = pollutant, values_from = pred_wght)
+
+gc()
+```
+
+# Join Covariates
+```{r}
+Covariates <- ShootingsAdj %>% 
+  left_join(Pollution, by = "GEOID") %>% 
+  left_join(ACSCovariates, by = "GEOID") %>% 
+  left_join(Population, by = "GEOID") %>% 
+  mutate(BlackPct = BlackPop / TotalPop, WhitePct = WhitePop / TotalPop, HispanicPct = HispanicPop / TotalPop)
+```
+
+## Shape Data
+
+# Clean THCIC GEOID Variable
+```{r}
+# Create 11-digit State-County-Tract GEOID Variable within THCIC
+THCIC <- THCIC %>%
+  mutate(GEOID = substr(THCIC$PAT_ADDR_CENSUS_BLOCK_GROUP, 1, 11))
+
+# Remove tracts outside of sufficiently urban RUCAs
+THCIC <- THCIC %>%
+  left_join(RUCACensus2010, by = "GEOID") %>%
+  filter(RUCA %in% c("1"))
+
+# Remove tracts without shooting exposure
+THCIC <- THCIC %>% 
+  left_join(ShootingsAdj, by = "GEOID") %>%
+  filter(!is.na(ShootingsPBIR)) %>%
+  select(-c("ShootingsPBIR", "shootings", "fatal_shootings", "nonfatal_shootings"))
+
+# Split into THCIC for Peds and Adults
+THCICPeds <- THCIC %>%
+  filter(AgeCat == "Pediatric")
+
+THCICAdult <- THCIC %>%
+  filter(AgeCat == "Adult")
+```
+
+
+# Split into race stratified datasets
+```{r}
+### Total
+
+## White
+THCICWhite <- THCIC %>% filter(RACE == 4, 
+                               ETHNICITY == 2) # White not Hispanic
+
+## Black
+THCICBlack <- THCIC %>% filter(RACE == 3,
+                               ETHNICITY == 2) # Black not Hispanic
+
+## Hispanic 
+THCICHispanic <- THCIC %>% filter(ETHNICITY == 1) # All Hispanic
+
+### Peds
+
+## White Peds
+THCICWhitePeds <- THCICPeds %>% filter(RACE == 4, 
+                               ETHNICITY == 2) # White not Hispanic
+
+## Black Peds
+THCICBlackPeds <- THCICPeds %>% filter(RACE == 3,
+                               ETHNICITY == 2) # Black not Hispanic
+
+## Hispanic Peds
+THCICHispanicPeds <- THCICPeds %>% filter(ETHNICITY == 1) # All Hispanic
+
+### Adults
+
+## White Adult
+THCICWhiteAdult <- THCICAdult %>% filter(RACE == 4, 
+                               ETHNICITY == 2) # White not Hispanic
+
+## Black Adult
+THCICBlackAdult <- THCICAdult %>% filter(RACE == 3,
+                               ETHNICITY == 2) # Black not Hispanic
+
+## Hispanic Adult
+THCICHispanicAdult <- THCICAdult %>% filter(ETHNICITY == 1) # All Hispanic
+```
+
+## Analyze Data
+
+# Generate Count of ED Visits Per Census Tract
+```{r}
+## Total
+THCICEDCount <- THCIC %>%
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICBlackEDCount <- THCICBlack %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICHispanicEDCount <- THCICHispanic %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICWhiteEDCount <- THCICWhite %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+## Pediatric
+THCICPedsEDCount <- THCICPeds %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICBlackPedsEDCount <- THCICBlackPeds %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICHispanicPedsEDCount <- THCICHispanicPeds %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICWhitePedsEDCount <- THCICWhitePeds %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+## Adult
+
+THCICAdultEDCount <- THCICAdult %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICBlackAdultEDCount <- THCICBlackAdult %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICHispanicAdultEDCount <- THCICHispanicAdult %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICWhiteAdultEDCount <- THCICWhiteAdult %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+```
+
+# Generate Population-Based Incidence Rates
+```{r}
+## Total
+
+THCICPBIR <- THCICEDCount %>% 
+  left_join(Population %>% select(GEOID, TotalPop), by = "GEOID") %>%
+  filter(TotalPop > 0) %>%
+  mutate(PBIR = TotalEDCount / TotalPop * 10000)
+
+THCICBlackPBIR <- THCICBlackEDCount %>% 
+  left_join(Population %>% select(GEOID, BlackPop), by = "GEOID") %>%
+  filter(BlackPop > 0) %>%
+  mutate(PBIR = TotalEDCount / BlackPop * 10000)
+
+THCICHispanicPBIR <- THCICHispanicEDCount %>% 
+  left_join(Population %>% select(GEOID, HispanicPop), by = "GEOID") %>%
+  filter(HispanicPop > 0) %>%
+  mutate(PBIR = TotalEDCount / HispanicPop * 10000)
+
+THCICWhitePBIR <- THCICWhiteEDCount %>% 
+  left_join(Population %>% select(GEOID, WhitePop), by = "GEOID") %>%
+  filter(WhitePop > 0) %>%
+  mutate(PBIR = TotalEDCount / WhitePop * 10000)
+
+## Pediatrics
+
+THCICPedsPBIR <- THCICPedsEDCount %>% 
+  left_join(Population %>% select(GEOID, TotalChildPop), by = "GEOID") %>%
+  filter(TotalChildPop > 0) %>%
+  mutate(PBIR = TotalEDCount / TotalChildPop * 10000)
+
+THCICBlackPedsPBIR <- THCICBlackPedsEDCount %>% 
+  left_join(Population %>% select(GEOID, BlackChildPop), by = "GEOID") %>%
+  filter(BlackChildPop > 0) %>%
+  mutate(PBIR = TotalEDCount / BlackChildPop * 10000)
+
+THCICHispanicPedsPBIR <- THCICHispanicPedsEDCount %>% 
+  left_join(Population %>% select(GEOID, HispanicChildPop), by = "GEOID") %>%
+  filter(HispanicChildPop > 0) %>%
+  mutate(PBIR = TotalEDCount / HispanicChildPop * 10000)
+
+THCICWhitePedsPBIR <- THCICWhitePedsEDCount %>% 
+  left_join(Population %>% select(GEOID, WhiteChildPop), by = "GEOID") %>%
+  filter(WhiteChildPop > 0) %>%
+  mutate(PBIR = TotalEDCount / WhiteChildPop * 10000)
+
+# Adult
+
+THCICAdultPBIR <- THCICAdultEDCount %>% 
+  left_join(Population %>% select(GEOID, TotalAdultPop), by = "GEOID") %>%
+  filter(TotalAdultPop > 0) %>%
+  mutate(PBIR = TotalEDCount / TotalAdultPop * 10000)
+
+THCICBlackAdultPBIR <- THCICBlackAdultEDCount %>% 
+  left_join(Population %>% select(GEOID, BlackAdultPop), by = "GEOID") %>%
+  filter(BlackAdultPop > 0) %>%
+  mutate(PBIR = TotalEDCount / BlackAdultPop * 10000)
+
+THCICHispanicAdultPBIR <- THCICHispanicAdultEDCount %>% 
+  left_join(Population %>% select(GEOID, HispanicAdultPop), by = "GEOID") %>%
+  filter(HispanicAdultPop > 0) %>%
+  mutate(PBIR = TotalEDCount / HispanicAdultPop * 10000)
+
+THCICWhiteAdultPBIR <- THCICWhiteAdultEDCount %>% 
+  left_join(Population %>% select(GEOID, WhiteAdultPop), by = "GEOID") %>%
+  filter(WhiteAdultPop > 0) %>%
+  mutate(PBIR = TotalEDCount / WhiteAdultPop * 10000)
+```
+
+# Generate Summary Statistics
+```{r}
+## Gun Violence
+
+ShootingsPBIRSummary <- THCICPBIR %>% 
+  left_join(ShootingsAdj, by = "GEOID") %>%
+  summarise(
+    Name = "ShootingsPBIR",
+    TotalAREDV = sum(shootings),
+    TotalPopAtRisk = sum(TotalPop),
+    MeanAREDV = mean(ShootingsPBIR),
+    SDAREDV = sd(ShootingsPBIR),
+    MedianAREDV = median(ShootingsPBIR),
+    IQRAREDV = IQR(ShootingsPBIR),
+    Min = min(ShootingsPBIR),
+    Max = max(ShootingsPBIR)
+)
+
+## Total
+
+THCICPBIRSummary <- THCICPBIR %>% summarise(
+  Name = "THCICPBIR",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(TotalPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+THCICBlackPBIRSummary <- THCICBlackPBIR %>% summarise(
+  Name = "THCICBlack",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(BlackPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+THCICHispanicPBIRSummary <- THCICHispanicPBIR %>% summarise(
+  Name = "THCICHispanic",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(HispanicPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+THCICWhitePBIRSummary <- THCICWhitePBIR %>% summarise(
+  Name = "THCICWhite",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(WhitePop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+## Pediatrics
+
+THCICPedsPBIRSummary <- THCICPedsPBIR %>% summarise(
+  Name = "THCICPeds",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(TotalChildPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+THCICBlackPedsPBIRSummary <- THCICBlackPedsPBIR %>% summarise(
+  Name = "THCICBlackPeds",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(BlackChildPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+THCICHispanicPedsPBIRSummary <- THCICHispanicPedsPBIR %>% summarise(
+  Name = "THCICHispanicPeds",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(HispanicChildPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+THCICWhitePedsPBIRSummary <- THCICWhitePedsPBIR %>% summarise(
+  Name = "THCICWhitePeds",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(WhiteChildPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+# Adult
+
+THCICAdultPBIRSummary <- THCICAdultPBIR %>% summarise(
+  Name = "THCICAdult",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(TotalAdultPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+THCICBlackAdultPBIRSummary <- THCICBlackAdultPBIR %>% summarise(
+  Name = "THCICBlackAdult",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(BlackAdultPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+THCICHispanicAdultPBIRSummary <- THCICHispanicAdultPBIR %>% summarise(
+  Name = "THCICHispanicAdult",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(HispanicAdultPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+THCICWhiteAdultPBIRSummary <- THCICWhiteAdultPBIR %>% summarise(
+  Name = "THCICWhiteAdult",
+  TotalAREDV = sum(TotalEDCount),
+  TotalPopAtRisk = sum(WhiteAdultPop),
+  MeanAREDV = mean(TotalEDCount),
+  SDAREDV = sd(PBIR),
+  MedianAREDV = median(PBIR),
+  IQRAREDV = IQR(PBIR),
+  Min = min(PBIR),
+  Max = max(PBIR)
+)
+
+## Bind Together
+Summary <- rbind(ShootingsPBIRSummary, 
+                 THCICPBIRSummary, 
+                 THCICBlackPBIRSummary, 
+                 THCICHispanicPBIRSummary,
+                 THCICWhitePBIRSummary,
+                 THCICPedsPBIRSummary,
+                 THCICBlackPedsPBIRSummary,
+                 THCICHispanicPedsPBIRSummary,
+                 THCICWhitePedsPBIRSummary,
+                 THCICAdultPBIRSummary,
+                 THCICBlackAdultPBIRSummary,
+                 THCICHispanicAdultPBIRSummary,
+                 THCICWhiteAdultPBIRSummary)
+
+write.csv(file = "Summary.csv", Summary)
+```
+
+# Poisson Total
+```{r}
+## Total Peds
+PoissonTotal <- THCICEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonTotalModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(TotalPop + 1)),
+  data = PoissonTotal,
+  family = poisson(link = "log")
+)
+
+summary(PoissonTotalModel)
+
+## Black Peds
+PoissonBlackTotal <- THCICBlackEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonBlackTotalModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(BlackPop + 1)),
+  data = PoissonBlackTotal,
+  family = poisson(link = "log")
+)
+
+summary(PoissonBlackTotalModel)
+
+## Hispanic Peds
+PoissonHispanicTotal <- THCICHispanicEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonHispanicTotalModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(HispanicPop + 1)),
+  data = PoissonHispanicTotal,
+  family = poisson(link = "log")
+)
+
+summary(PoissonHispanicTotalModel)
+
+## White Peds
+PoissonWhiteTotal <- THCICWhiteEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonWhiteTotalModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(WhitePop + 1)),
+  data = PoissonWhiteTotal,
+  family = poisson(link = "log")
+)
+
+summary(PoissonWhiteTotalModel)
+
+gc()
+```
+
+# Poisson Peds
+```{r}
+## Total Peds
+PoissonPeds <- THCICPedsEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonPedsModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(TotalChildPop + 1)),
+  data = PoissonPeds,
+  family = poisson(link = "log")
+)
+
+summary(PoissonPedsModel)
+
+## Black Peds
+PoissonBlackPeds <- THCICBlackPedsEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonBlackPedsModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(BlackChildPop + 1)),
+  data = PoissonBlackPeds,
+  family = poisson(link = "log")
+)
+
+summary(PoissonBlackPedsModel)
+
+## Hispanic Peds
+PoissonHispanicPeds <- THCICHispanicPedsEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonHispanicPedsModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(HispanicChildPop + 1)),
+  data = PoissonHispanicPeds,
+  family = poisson(link = "log")
+)
+
+summary(PoissonHispanicPedsModel)
+
+## White Peds
+PoissonWhitePeds <- THCICWhitePedsEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonWhitePedsModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(WhiteChildPop + 1)),
+  data = PoissonWhitePeds,
+  family = poisson(link = "log")
+)
+
+summary(PoissonWhitePedsModel)
+
+gc()
+```
+
+# Poisson Adult
+```{r}
+## Total Adult
+PoissonAdult <- THCICAdultEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonAdultModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(TotalAdultPop + 1)),
+  data = PoissonAdult,
+  family = poisson(link = "log")
+)
+
+summary(PoissonAdultModel)
+
+## Black Adult
+PoissonBlackAdult <- THCICBlackAdultEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonBlackAdultModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(BlackAdultPop + 1)),
+  data = PoissonBlackAdult,
+  family = poisson(link = "log")
+)
+
+summary(PoissonBlackAdultModel)
+
+## Hispanic Adult
+PoissonHispanicAdult <- THCICHispanicAdultEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonHispanicAdultModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(HispanicAdultPop + 1)),
+  data = PoissonHispanicAdult,
+  family = poisson(link = "log")
+)
+
+summary(PoissonHispanicAdultModel)
+
+## White Peds
+PoissonWhiteAdult <- THCICWhiteAdultEDCount %>% left_join(Covariates, by = "GEOID")
+
+PoissonWhiteAdultModel <- glm(
+  TotalEDCount ~ log(ShootingsPBIR + 1) + o3 + no2 + pm10 + pm25 + so2 + poverty + no_vehicle + no_computer + no_insurance + less_than_hs_ed + natural_gas + resident_per_br + ten_units + two_br_or_less + unoccupied_housing + BlackPct + WhitePct + HispanicPct + offset(log(WhiteAdultPop + 1)),
+  data = PoissonWhiteAdult,
+  family = poisson(link = "log")
+)
+
+summary(PoissonWhiteAdultModel)
+
+gc()
+```

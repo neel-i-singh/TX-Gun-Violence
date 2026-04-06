@@ -639,3 +639,111 @@ summary(PoissonWhiteAdultModel)
 
 gc()
 ```
+
+# Model Results Summary
+```{r}
+## Total
+
+PoissonTotalModelResults <- data.frame(
+  Name = "PoissonTotalModel",
+  IRR = as.numeric(exp(coef(PoissonTotalModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonTotalModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonTotalModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+PoissonBlackTotalModelResults <- data.frame(
+  Name = "PoissonBlackTotalModel",
+  IRR = as.numeric(exp(coef(PoissonBlackTotalModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonBlackTotalModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonBlackTotalModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+PoissonHispanicTotalModelResults <- data.frame(
+  Name = "PoissonHispanicTotalModel",
+  IRR = as.numeric(exp(coef(PoissonHispanicTotalModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonHispanicTotalModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonHispanicTotalModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+PoissonWhiteTotalModelResults <- data.frame(
+  Name = "PoissonWhiteTotalModel",
+  IRR = as.numeric(exp(coef(PoissonWhiteTotalModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonWhiteTotalModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonWhiteTotalModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+## Pediatrics
+
+PoissonPedsModelResults <- data.frame(
+  Name = "PoissonPedsModel",
+  IRR = as.numeric(exp(coef(PoissonPedsModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonPedsModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonPedsModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+PoissonBlackPedsModelResults <- data.frame(
+  Name = "PoissonBlackPedsModel",
+  IRR = as.numeric(exp(coef(PoissonBlackPedsModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonBlackPedsModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonBlackPedsModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+PoissonHispanicPedsModelResults <- data.frame(
+  Name = "PoissonHispanicPedsModel",
+  IRR = as.numeric(exp(coef(PoissonHispanicPedsModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonHispanicPedsModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonHispanicPedsModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+PoissonWhitePedsModelResults <- data.frame(
+  Name = "PoissonWhitePedsModel",
+  IRR = as.numeric(exp(coef(PoissonWhitePedsModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonWhitePedsModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonWhitePedsModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+## Adults
+
+PoissonAdultModelResults <- data.frame(
+  Name = "PoissonAdultModel",
+  IRR = as.numeric(exp(coef(PoissonAdultModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonAdultModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonAdultModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+PoissonBlackAdultModelResults <- data.frame(
+  Name = "PoissonBlackAdultModel",
+  IRR = as.numeric(exp(coef(PoissonBlackAdultModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonBlackAdultModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonBlackAdultModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+PoissonHispanicAdultModelResults <- data.frame(
+  Name = "PoissonHispanicAdultModel",
+  IRR = as.numeric(exp(coef(PoissonHispanicAdultModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonHispanicAdultModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonHispanicAdultModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+PoissonWhiteAdultModelResults <- data.frame(
+  Name = "PoissonWhiteAdultModel",
+  IRR = as.numeric(exp(coef(PoissonWhiteAdultModel)["log(ShootingsPBIR + 1)"])),
+  ci_lower = as.numeric(exp(confint(PoissonWhiteAdultModel, "log(ShootingsPBIR + 1)")[1])),
+  ci_upper = as.numeric(exp(confint(PoissonWhiteAdultModel, "log(ShootingsPBIR + 1)")[2]))
+)
+
+ModelResultsSummary <- rbind(PoissonTotalModelResults, 
+      PoissonBlackTotalModelResults,
+      PoissonHispanicTotalModelResults,
+      PoissonWhiteTotalModelResults,
+      PoissonPedsModelResults,
+      PoissonBlackPedsModelResults,
+      PoissonHispanicPedsModelResults,
+      PoissonWhitePedsModelResults,
+      PoissonAdultModelResults,
+      PoissonBlackAdultModelResults,
+      PoissonHispanicAdultModelResults,
+      PoissonWhiteAdultModelResults)
+
+write.csv(file = "ModelResultsSummary.csv", ModelResultsSummary)
+```

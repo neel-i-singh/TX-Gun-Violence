@@ -1,0 +1,86 @@
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+
+# Shared RHS of the model
+base_terms <- paste(
+  "log(ShootingsPBIR + 1)",
+  "o3", "no2", "pm10", "pm25", "so2",
+  "poverty", "no_vehicle", "no_computer", "no_insurance",
+  "less_than_hs_ed", "natural_gas", "resident_per_br",
+  "ten_units", "two_br_or_less", "unoccupied_housing",
+  "BlackPct", "WhitePct", "HispanicPct",
+  sep = " + "
+)
+
+# Function to fit one model
+fit_poisson_model <- function(ed_data, offset_var, covariates = Covariates) {
+  model_data <- ed_data %>%
+    left_join(covariates, by = "GEOID")
+
+  formula <- as.formula(
+    paste0(
+      "TotalEDCount ~ ", base_terms,
+      " + offset(log(", offset_var, " + 1))"
+    )
+  )
+
+  glm(
+    formula,
+    data = model_data,
+    family = poisson(link = "log")
+  )
+}
+
+# All model specifications in one place
+model_specs <- tribble(
+  ~Name,                        ~data_obj,                   ~offset_var,
+  "PoissonTotalModel",          THCICEDCount,               "TotalPop",
+  "PoissonBlackTotalModel",     THCICBlackEDCount,          "BlackPop",
+  "PoissonHispanicTotalModel",  THCICHispanicEDCount,       "HispanicPop",
+  "PoissonWhiteTotalModel",     THCICWhiteEDCount,          "WhitePop",
+
+  "PoissonPedsModel",           THCICPedsEDCount,           "TotalChildPop",
+  "PoissonBlackPedsModel",      THCICBlackPedsEDCount,      "BlackChildPop",
+  "PoissonHispanicPedsModel",   THCICHispanicPedsEDCount,   "HispanicChildPop",
+  "PoissonWhitePedsModel",      THCICWhitePedsEDCount,      "WhiteChildPop",
+
+  "PoissonAdultModel",          THCICAdultEDCount,          "TotalAdultPop",
+  "PoissonBlackAdultModel",     THCICBlackAdultEDCount,     "BlackAdultPop",
+  "PoissonHispanicAdultModel",  THCICHispanicAdultEDCount,  "HispanicAdultPop",
+  "PoissonWhiteAdultModel",     THCICWhiteAdultEDCount,     "WhiteAdultPop"
+)
+
+# Fit all models
+models <- model_specs %>%
+  mutate(
+    model = map2(data_obj, offset_var, fit_poisson_model)
+  )
+
+# Optional: print summaries for all models
+walk(models$model, summary)
+
+gc()
+
+
+####
+
+```r
+```{r}
+extract_irr <- function(model, term = "log(ShootingsPBIR + 1)") {
+  ci <- confint(model, term)
+
+  data.frame(
+    IRR = as.numeric(exp(coef(model)[term])),
+    ci_lower = as.numeric(exp(ci[1])),
+    ci_upper = as.numeric(exp(ci[2]))
+  )
+}
+
+ModelResultsSummary <- models %>%
+  mutate(results = map(model, extract_irr)) %>%
+  select(Name, results) %>%
+  tidyr::unnest(results)
+
+write.csv(ModelResultsSummary, file = "ModelResultsSummary.csv", row.names = FALSE)

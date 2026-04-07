@@ -1,0 +1,345 @@
+---
+title: "TX ED GV Condensed"
+author: "Neel Singh"
+date: "2026-01-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Libraries
+```{r}
+library(tidyverse)
+library(tidyverse)
+library(readxl)
+library(readr)
+library(tidyverse)
+library(car)
+```
+
+## Import Data
+
+# THCIC Import
+```{r}
+THCIC <- readRDS("RDS/ED_asthma.rds") %>% 
+  # Remove observations with no geolocation data and living outside of TX
+  filter(!is.na(PAT_ADDR_CENSUS_BLOCK_GROUP),
+         substr(PAT_ADDR_CENSUS_BLOCK_GROUP, 1, 2) == "48") %>%
+  # make patient age numeric and add pediatric/adult categories
+  mutate(PAT_AGE_YEARS = as.numeric(PAT_AGE_YEARS),
+         AgeCat = ifelse(PAT_AGE_YEARS < 18, "Pediatric", "Adult"))
+
+gc()
+```
+
+# ACS Covariates Import
+```{r}
+ACSCovariates <- readRDS("Covariates.rds")
+
+gc()
+```
+
+# ACS Population Import
+```{r}
+Population <- readRDS("TXPopulation.rds")
+
+gc()
+```
+
+# Shootings Import
+```{r}
+Shootings <- readRDS("ShootingsTX.rds")
+
+ShootingsAdj <- Shootings %>% left_join(Population, by = "GEOID")
+
+ShootingsAdj <- ShootingsAdj %>% select(GEOID, shootings, fatal_shootings, nonfatal_shootings, TotalPop) %>%
+  filter(TotalPop > 0) %>%
+  mutate(ShootingsPBIR = shootings / TotalPop * 10000) %>%
+  select(GEOID, ShootingsPBIR, shootings, fatal_shootings, nonfatal_shootings)
+
+gc()
+```
+
+# USDA RUCA Import
+```{r}
+RUCACensus2010 <- read_excel("RUCACensus2010.xlsx", 
+    skip = 1) %>% # rename GEOID and RUCA columns
+  rename("GEOID" = "State-County-Tract FIPS Code (lookup by address at http://www.ffiec.gov/Geocode/)",
+         "RUCA" = "Primary RUCA Code 2010") %>%
+  # select only necessary columns
+  select(GEOID, RUCA)
+
+gc()
+```
+
+# Pollution Data Import
+```{r}
+Pollution <- read_csv("CACESPollutionCensus2010.csv")
+
+Pollution <- Pollution %>% 
+  rename("GEOID" = "fips") %>%
+  mutate(GEOID = as.character(GEOID), year = as.character(year)) %>%
+  filter(year %in% c("2016", "2017", "2018", "2019")) %>%
+  select(GEOID, pollutant, pred_wght) %>%
+  group_by(GEOID, pollutant) %>%
+  summarise(pred_wght = mean(pred_wght, na.rm = T
+  ), .groups = "drop") %>%
+  pivot_wider(names_from = pollutant, values_from = pred_wght)
+
+gc()
+```
+
+# COI 3.0 Import
+```{r}
+COI20 <- read_csv("COI20 Indicators Raw.csv") %>% 
+  filter(statefips == "48", 
+         year == "2015") %>%
+  rename("GEOID" = "geoid") %>%
+  select(GEOID,
+         HE_FOOD,
+         HE_GREEN,
+         HE_WALK,
+         HE_SUPRFND,
+         HE_HEAT,
+         SE_SINGLE, #lets think about this one,
+         SE_PUBLIC,
+         HE_RSEI)
+  
+gc()
+```
+
+# Join Covariates
+```{r}
+Covariates <- ShootingsAdj %>% 
+  left_join(Pollution, by = "GEOID") %>% 
+  left_join(ACSCovariates, by = "GEOID") %>% 
+  left_join(COI20, by = "GEOID") %>%
+  left_join(Population, by = "GEOID") %>% 
+  mutate(BlackPct = BlackPop / TotalPop, WhitePct = WhitePop / TotalPop, HispanicPct = HispanicPop / TotalPop)
+```
+
+## Shape Data
+
+# Clean THCIC GEOID Variable
+```{r}
+# Create 11-digit State-County-Tract GEOID Variable within THCIC
+THCIC <- THCIC %>%
+  mutate(GEOID = substr(THCIC$PAT_ADDR_CENSUS_BLOCK_GROUP, 1, 11))
+
+# Remove tracts outside of sufficiently urban RUCAs
+THCIC <- THCIC %>%
+  left_join(RUCACensus2010, by = "GEOID") %>%
+  filter(RUCA %in% c("1"))
+
+# Remove tracts without shooting exposure
+THCIC <- THCIC %>% 
+  left_join(ShootingsAdj, by = "GEOID") %>%
+  filter(!is.na(ShootingsPBIR)) %>%
+  select(-c("ShootingsPBIR", "shootings", "fatal_shootings", "nonfatal_shootings"))
+
+# Split into THCIC for Peds and Adults
+THCICPeds <- THCIC %>%
+  filter(AgeCat == "Pediatric")
+
+THCICAdult <- THCIC %>%
+  filter(AgeCat == "Adult")
+```
+
+
+# Split into race stratified datasets
+```{r}
+### Total
+
+## White
+THCICWhite <- THCIC %>% filter(RACE == 4, 
+                               ETHNICITY == 2) # White not Hispanic
+
+## Black
+THCICBlack <- THCIC %>% filter(RACE == 3,
+                               ETHNICITY == 2) # Black not Hispanic
+
+## Hispanic 
+THCICHispanic <- THCIC %>% filter(ETHNICITY == 1) # All Hispanic
+
+### Peds
+
+## White Peds
+THCICWhitePeds <- THCICPeds %>% filter(RACE == 4, 
+                               ETHNICITY == 2) # White not Hispanic
+
+## Black Peds
+THCICBlackPeds <- THCICPeds %>% filter(RACE == 3,
+                               ETHNICITY == 2) # Black not Hispanic
+
+## Hispanic Peds
+THCICHispanicPeds <- THCICPeds %>% filter(ETHNICITY == 1) # All Hispanic
+
+### Adults
+
+## White Adult
+THCICWhiteAdult <- THCICAdult %>% filter(RACE == 4, 
+                               ETHNICITY == 2) # White not Hispanic
+
+## Black Adult
+THCICBlackAdult <- THCICAdult %>% filter(RACE == 3,
+                               ETHNICITY == 2) # Black not Hispanic
+
+## Hispanic Adult
+THCICHispanicAdult <- THCICAdult %>% filter(ETHNICITY == 1) # All Hispanic
+```
+
+## Analyze Data
+
+# Generate Count of ED Visits Per Census Tract
+```{r}
+## Total
+THCICEDCount <- THCIC %>%
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICBlackEDCount <- THCICBlack %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICHispanicEDCount <- THCICHispanic %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICWhiteEDCount <- THCICWhite %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+## Pediatric
+THCICPedsEDCount <- THCICPeds %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICBlackPedsEDCount <- THCICBlackPeds %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICHispanicPedsEDCount <- THCICHispanicPeds %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICWhitePedsEDCount <- THCICWhitePeds %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+## Adult
+
+THCICAdultEDCount <- THCICAdult %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICBlackAdultEDCount <- THCICBlackAdult %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICHispanicAdultEDCount <- THCICHispanicAdult %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+
+THCICWhiteAdultEDCount <- THCICWhiteAdult %>% 
+  group_by(GEOID) %>%
+  summarise("TotalEDCount" = n(),
+            .groups = "drop")
+```
+
+# Models
+```{r}
+# Shared RHS of the model
+base_terms <- paste(
+  "log(ShootingsPBIR + 1)",
+  "no2", "pm10", "pm25", "so2",
+  "poverty", "no_vehicle", "no_computer", "no_insurance",
+  "less_than_hs_ed", "natural_gas", "resident_per_br",
+  "ten_units", "two_br_or_less", "unoccupied_housing",
+  "HE_FOOD", "HE_GREEN", "HE_WALK", "HE_SUPRFND", "HE_HEAT",
+  "SE_SINGLE", "SE_PUBLIC", "HE_RSEI",
+  "BlackPct", "WhitePct", "HispanicPct",
+  sep = " + "
+)
+
+# Function to fit one model
+fit_poisson_model <- function(ed_data, offset_var, covariates = Covariates) {
+  model_data <- ed_data %>%
+    left_join(covariates, by = "GEOID")
+
+  formula <- as.formula(
+    paste0(
+      "TotalEDCount ~ ", base_terms,
+      " + offset(log(", offset_var, " + 1))"
+    )
+  )
+
+  glm(
+    formula,
+    data = model_data,
+    family = poisson(link = "log")
+  )
+}
+
+# All model specifications in one place
+model_specs <- tribble(
+  ~Name,                        ~data_obj,                   ~offset_var,
+  "PoissonTotalModel",          THCICEDCount,               "TotalPop",
+  "PoissonBlackTotalModel",     THCICBlackEDCount,          "BlackPop",
+  "PoissonHispanicTotalModel",  THCICHispanicEDCount,       "HispanicPop",
+  "PoissonWhiteTotalModel",     THCICWhiteEDCount,          "WhitePop",
+
+  "PoissonPedsModel",           THCICPedsEDCount,           "TotalChildPop",
+  "PoissonBlackPedsModel",      THCICBlackPedsEDCount,      "BlackChildPop",
+  "PoissonHispanicPedsModel",   THCICHispanicPedsEDCount,   "HispanicChildPop",
+  "PoissonWhitePedsModel",      THCICWhitePedsEDCount,      "WhiteChildPop",
+
+  "PoissonAdultModel",          THCICAdultEDCount,          "TotalAdultPop",
+  "PoissonBlackAdultModel",     THCICBlackAdultEDCount,     "BlackAdultPop",
+  "PoissonHispanicAdultModel",  THCICHispanicAdultEDCount,  "HispanicAdultPop",
+  "PoissonWhiteAdultModel",     THCICWhiteAdultEDCount,     "WhiteAdultPop"
+)
+
+# Fit all models
+models <- model_specs %>%
+  mutate(
+    model = map2(data_obj, offset_var, fit_poisson_model)
+  )
+
+# Print summaries for all models
+walk(models$model, summary)
+
+gc()
+```
+
+# Model Summaries
+```{r}
+extract_irr <- function(model, term = "log(ShootingsPBIR + 1)") {
+  ci <- confint(model, term)
+
+  data.frame(
+    IRR = as.numeric(exp(coef(model)[term])),
+    ci_lower = as.numeric(exp(ci[1])),
+    ci_upper = as.numeric(exp(ci[2]))
+  )
+}
+
+ModelResultsSummary <- models %>%
+  mutate(results = map(model, extract_irr)) %>%
+  select(Name, results) %>%
+  tidyr::unnest(results)
+
+write.csv(ModelResultsSummary, file = "ModelResultsSummary.csv", row.names = FALSE)
+```
